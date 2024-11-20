@@ -10,11 +10,27 @@ from data_factory.data_loader import get_loader_segment
 
 
 def my_kl_loss(p, q):
+    """KL Divergence metrics series and prior
+
+    Args:
+        p (tensor): prior/series association
+        q (tensor): series/series association
+
+    Returns:
+        float: Loss of the function
+    """
     res = p * (torch.log(p + 0.0001) - torch.log(q + 0.0001))
     return torch.mean(torch.sum(res, dim=-1), dim=1)
 
 
 def adjust_learning_rate(optimizer, epoch, lr_):
+    """Halves the learning rate for each epoch
+
+    Args:
+        - optimizer (torch.optim.Optimizer): The optimizer for which the learning rate needs to be adjusted.
+        - epoch (int): The current epoch number. This is used to determine the new learning rate.
+        - lr_ (float): The initial or base learning rate from which adjustments start.
+    """
     lr_adjust = {epoch: lr_ * (0.5 ** ((epoch - 1) // 1))}
     if epoch in lr_adjust.keys():
         lr = lr_adjust[epoch]
@@ -24,7 +40,24 @@ def adjust_learning_rate(optimizer, epoch, lr_):
 
 
 class EarlyStopping:
+    """Early Stopping class
+    """
     def __init__(self, patience=7, verbose=False, dataset_name='', delta=0):
+        """_summary_
+
+        Args:
+            patience (int): Number of epochs to wait after the last improvement in validation loss before stopping. Default is 7.
+            verbose (bool): If True, prints a message when a new checkpoint is saved. Default is False.
+            dataset_name (str): Name of the dataset, used in the checkpoint file name. Default is an empty string.
+            delta (float): Minimum change in the monitored validation loss to qualify as an improvement. Default is 0.
+            counter (int): Counts the number of epochs without improvement.
+            best_score (float): Tracks the best score (negative validation loss) observed so far for the first validation loss metric.
+            best_score2 (float): Tracks the best score (negative validation loss) observed so far for the second validation loss metric.
+            early_stop (bool): Flag to indicate whether training should be stopped.
+            val_loss_min (float): Tracks the minimum value of the first validation loss.
+            val_loss2_min (float): Tracks the minimum value of the second validation loss.
+            dataset (str): Stores the dataset name passed during initialization.
+        """
         self.patience = patience
         self.verbose = verbose
         self.counter = 0
@@ -37,24 +70,40 @@ class EarlyStopping:
         self.dataset = dataset_name
 
     def __call__(self, val_loss, val_loss2, model, path):
+        """ Monitors validation losses and decides whether to stop training early.
+    Saves the model checkpoint if validation loss improves
+
+        Args:
+            val_loss (float): The validation loss for the first metrics
+            val_loss2 (float): The validation loss for the second metrics
+            model (torch.nn.Module): The PyTorch model being trained.
+            path (string): The directory path where the model checkpoint will be saved.
+        """
         score = -val_loss
         score2 = -val_loss2
-        if self.best_score is None:
+        if self.best_score is None: #Base
             self.best_score = score
             self.best_score2 = score2
             self.save_checkpoint(val_loss, val_loss2, model, path)
-        elif score < self.best_score + self.delta or score2 < self.best_score2 + self.delta:
+        elif score < self.best_score + self.delta or score2 < self.best_score2 + self.delta: #No improvements
             self.counter += 1
             print(f'EarlyStopping counter: {self.counter} out of {self.patience}')
             if self.counter >= self.patience:
                 self.early_stop = True
-        else:
+        else: #Improvements
             self.best_score = score
             self.best_score2 = score2
             self.save_checkpoint(val_loss, val_loss2, model, path)
             self.counter = 0
 
     def save_checkpoint(self, val_loss, val_loss2, model, path):
+        """Save the model to some path and update the best loss
+        Args:
+            val_loss (float): The validation loss for the first metrics
+            val_loss2 (float): The validation loss for the second metrics
+            model ((torch.nn.Module): The PyTorch model being trained.
+            path (string): The directory path where the model checkpoint will be saved.
+        """
         if self.verbose:
             print(f'Validation loss decreased ({self.val_loss_min:.6f} --> {val_loss:.6f}).  Saving model ...')
         torch.save(model.state_dict(), os.path.join(path, str(self.dataset) + '_checkpoint.pth'))
@@ -66,9 +115,13 @@ class Solver(object):
     DEFAULTS = {}
 
     def __init__(self, config):
-
+        """Solver class that does training and testing
+        Args:
+            config (dict): Argparser arguments
+        """
         self.__dict__.update(Solver.DEFAULTS, **config)
 
+        #Load train val, test and threshold data
         self.train_loader = get_loader_segment(self.data_path, batch_size=self.batch_size, win_size=self.win_size,
                                                mode='train',
                                                dataset=self.dataset)
@@ -81,12 +134,17 @@ class Solver(object):
         self.thre_loader = get_loader_segment(self.data_path, batch_size=self.batch_size, win_size=self.win_size,
                                               mode='thre',
                                               dataset=self.dataset)
-
+        #build the anomaly transformer model
         self.build_model()
+        #set device
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        #set loss
         self.criterion = nn.MSELoss()
 
+    
     def build_model(self):
+        """Build the model by setting the field of model optimizer etc.
+        """
         self.model = AnomalyTransformer(win_size=self.win_size, enc_in=self.input_c, c_out=self.output_c, e_layers=3)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
 
@@ -96,7 +154,7 @@ class Solver(object):
     def vali(self, vali_loader):
         self.model.eval()
 
-        loss_1 = []
+        loss_1 = [] 
         loss_2 = []
         for i, (input_data, _) in enumerate(vali_loader):
             input = input_data.float().to(self.device)
@@ -110,14 +168,14 @@ class Solver(object):
                     my_kl_loss(
                         (prior[u] / torch.unsqueeze(torch.sum(prior[u], dim=-1), dim=-1).repeat(1, 1, 1,
                                                                                                 self.win_size)).detach(),
-                        series[u])))
+                        series[u])))  #detach prior Assdis of series
                 prior_loss += (torch.mean(
                     my_kl_loss((prior[u] / torch.unsqueeze(torch.sum(prior[u], dim=-1), dim=-1).repeat(1, 1, 1,
                                                                                                        self.win_size)),
                                series[u].detach())) + torch.mean(
                     my_kl_loss(series[u].detach(),
                                (prior[u] / torch.unsqueeze(torch.sum(prior[u], dim=-1), dim=-1).repeat(1, 1, 1,
-                                                                                                       self.win_size)))))
+                                                                                                       self.win_size))))) #detach series Assdis of prior
             series_loss = series_loss / len(prior)
             prior_loss = prior_loss / len(prior)
 
@@ -161,22 +219,22 @@ class Solver(object):
                                                                                                    self.win_size)).detach())) + torch.mean(
                         my_kl_loss((prior[u] / torch.unsqueeze(torch.sum(prior[u], dim=-1), dim=-1).repeat(1, 1, 1,
                                                                                                            self.win_size)).detach(),
-                                   series[u])))
+                                   series[u]))) #detach prior Assdis of series
                     prior_loss += (torch.mean(my_kl_loss(
                         (prior[u] / torch.unsqueeze(torch.sum(prior[u], dim=-1), dim=-1).repeat(1, 1, 1,
                                                                                                 self.win_size)),
                         series[u].detach())) + torch.mean(
                         my_kl_loss(series[u].detach(), (
                                 prior[u] / torch.unsqueeze(torch.sum(prior[u], dim=-1), dim=-1).repeat(1, 1, 1,
-                                                                                                       self.win_size)))))
+                                                                                                       self.win_size)))))#detach series Assdis of prior
                 series_loss = series_loss / len(prior)
                 prior_loss = prior_loss / len(prior)
 
-                rec_loss = self.criterion(output, input)
+                rec_loss = self.criterion(output, input) #recreation loss
 
                 loss1_list.append((rec_loss - self.k * series_loss).item())
-                loss1 = rec_loss - self.k * series_loss
-                loss2 = rec_loss + self.k * prior_loss
+                loss1 = rec_loss - self.k * series_loss #Min phase
+                loss2 = rec_loss + self.k * prior_loss #Max Phase
 
                 if (i + 1) % 100 == 0:
                     speed = (time.time() - time_now) / iter_count
@@ -193,7 +251,7 @@ class Solver(object):
             print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
             train_loss = np.average(loss1_list)
 
-            vali_loss1, vali_loss2 = self.vali(self.test_loader)
+            vali_loss1, vali_loss2 = self.vali(self.test_loader) #Validation
 
             print(
                 "Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Vali Loss: {3:.7f} ".format(
@@ -205,10 +263,12 @@ class Solver(object):
             adjust_learning_rate(self.optimizer, epoch + 1, self.lr)
 
     def test(self):
+        # Cri is Anomaly Score
+        # An threshold set is used to determine the threshold
         self.model.load_state_dict(
             torch.load(
                 os.path.join(str(self.model_save_path), str(self.dataset) + '_checkpoint.pth')))
-        self.model.eval()
+        self.model.eval() #model loading
         temperature = 50
 
         print("======================TEST MODE======================")
@@ -224,7 +284,7 @@ class Solver(object):
             series_loss = 0.0
             prior_loss = 0.0
             for u in range(len(prior)):
-                if u == 0:
+                if u == 0: #first iter
                     series_loss = my_kl_loss(series[u], (
                             prior[u] / torch.unsqueeze(torch.sum(prior[u], dim=-1), dim=-1).repeat(1, 1, 1,
                                                                                                    self.win_size)).detach()) * temperature
@@ -232,7 +292,7 @@ class Solver(object):
                         (prior[u] / torch.unsqueeze(torch.sum(prior[u], dim=-1), dim=-1).repeat(1, 1, 1,
                                                                                                 self.win_size)),
                         series[u].detach()) * temperature
-                else:
+                else: #other iter
                     series_loss += my_kl_loss(series[u], (
                             prior[u] / torch.unsqueeze(torch.sum(prior[u], dim=-1), dim=-1).repeat(1, 1, 1,
                                                                                                    self.win_size)).detach()) * temperature
@@ -241,12 +301,12 @@ class Solver(object):
                                                                                                 self.win_size)),
                         series[u].detach()) * temperature
 
-            metric = torch.softmax((-series_loss - prior_loss), dim=-1)
+            metric = torch.softmax((-series_loss - prior_loss), dim=-1) 
             cri = metric * loss
-            cri = cri.detach().cpu().numpy()
-            attens_energy.append(cri)
+            cri = cri.detach().cpu().numpy() #Anomaly Score
+            attens_energy.append(cri) #List of anomaly score
 
-        attens_energy = np.concatenate(attens_energy, axis=0).reshape(-1)
+        attens_energy = np.concatenate(attens_energy, axis=0).reshape(-1) #nunpy array of anomaly score
         train_energy = np.array(attens_energy)
 
         # (2) find the threshold
@@ -285,7 +345,8 @@ class Solver(object):
         attens_energy = np.concatenate(attens_energy, axis=0).reshape(-1)
         test_energy = np.array(attens_energy)
         combined_energy = np.concatenate([train_energy, test_energy], axis=0)
-        thresh = np.percentile(combined_energy, 100 - self.anormly_ratio)
+        #calculate the percentile of 100-self.anomaly ratio to get the threshold
+        thresh = np.percentile(combined_energy, 100 - self.anormly_ratio) 
         print("Threshold :", thresh)
 
         # (3) evaluation on the test set
@@ -319,7 +380,7 @@ class Solver(object):
             metric = torch.softmax((-series_loss - prior_loss), dim=-1)
 
             cri = metric * loss
-            cri = cri.detach().cpu().numpy()
+            cri = cri.detach().cpu().numpy() #Anomaly Score
             attens_energy.append(cri)
             test_labels.append(labels)
 
@@ -328,6 +389,7 @@ class Solver(object):
         test_energy = np.array(attens_energy)
         test_labels = np.array(test_labels)
 
+        #Predict whether it is Anomaly 1 : yes(High Anomaly Score) 0: No (Low Anomaly Score)
         pred = (test_energy > thresh).astype(int)
 
         gt = test_labels.astype(int)
@@ -336,6 +398,8 @@ class Solver(object):
         print("gt:     ", gt.shape)
 
         # detection adjustment: please see this issue for more information https://github.com/thuml/Anomaly-Transformer/issues/14
+        # kind of cheating by adjusting (The assumption is if there is an Anomaly it should enter some states that forward and backward
+        # should be adjusted?)
         anomaly_state = False
         for i in range(len(gt)):
             if gt[i] == 1 and pred[i] == 1 and not anomaly_state:
